@@ -1,0 +1,12 @@
+highspy>=1.11
+pydantic>=2.6
+
+[api]
+fastapi>=0.110
+uvicorn>=0.29
+
+[dev]
+pytest>=8.0
+
+[mcp]
+mcp>=2.0

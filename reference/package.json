@@ -1,0 +1,7 @@
+{
+  "name": "shiftops-reference",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The browser prototype's solver, kept so the Python model can be proved equivalent to it.",
+  "dependencies": { "highs": "^1.0.0" }
+}
