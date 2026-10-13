@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiftops"
+version = "0.1.0"
+description = "Two-stage MIP workforce scheduling and rule-based repair for F&B branches"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "highspy>=1.11",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+mcp = ["mcp>=2.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+shiftops = "shiftops.cli:main"
+
+[tool.setuptools]
+packages = ["shiftops"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
