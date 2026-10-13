@@ -65,8 +65,11 @@ Optimal  154 shifts over 31 days (2026-08-01 to 2026-08-31)
   solved in    212 ms  (parameters pilot-2026-08)
 ```
 
-Against the roster Clock Coffee actually ran in August: **97.1% of demand met
-against their 90.7%, with zero rule breaches against their 34.**
+Against the roster Clock Coffee actually ran in August, measured the same way:
+**97.1% of demand met against their 93.6%, with zero rule breaches against their
+34.** (Their roster scores 90.7% under the prototype's old cover rule and 93.6%
+under this one — both rosters move together when the yardstick changes, which is
+the point of measuring them with the same instrument.)
 
 Other things worth trying:
 
@@ -196,7 +199,15 @@ cd reference && npm install && cd ..
 python -m pytest tests/ -q
 ```
 
-Without `npm install` those seven tests skip and the other twenty-one still run.
+The same comparison runs again with the corrections switched **on**, which is
+what stops the demo and the model reporting two different numbers for the same
+month:
+
+```
+154 shifts · 1 unfilled · EUR 7234.13 straight · 97.12% of demand · 0 breaches
+```
+
+Without `npm install` those eleven tests skip and the other twenty-one still run.
 
 ## What this does not do yet
 

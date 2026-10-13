@@ -34,9 +34,21 @@ const DEFAULTS = {
   min_rest_hours: 11,         // CY s4
   max_days_per_week: 6,       // CY s6, as a day count
   weekly_rest_hours: 24,      // CY s6, as a continuous window
-  break_minutes: 15,          // CY s5 — subtracted from cover on shifts over...
-  break_threshold_hours: 6,   // ...this many hours
-  apply_breaks: true,
+  break_minutes: 15,          // CY s5
+  break_threshold_hours: 6,   // shift length at which the break becomes due
+  // How the break enters the model.
+  //   ignore -- it does not reduce cover, on the reading that a colleague covers
+  //             the floor for fifteen minutes. The default.
+  //   smear  -- spread evenly over the shift, as this solver used to do. It makes
+  //             a requirement of three baristas unmeetable by three shifts.
+  // A break scheduled as a real interruption needs the model at 15-minute
+  // granularity and is not implemented.
+  break_treatment: 'ignore',
+  // How a shift counts towards an hour it only partly covers.
+  //   fractional -- the minutes actually worked: 05:30-15:00 gives half of 05:00.
+  //   indicator  -- all or nothing at the half-hour mark, as this solver used to
+  //                 do. It credits 31 minutes with a whole hour and 29 with none.
+  cover_mode: 'fractional',
 
   // --- shift structure
   max_distinct_shifts: 5,     // K in MIP 1
@@ -51,6 +63,10 @@ const DEFAULTS = {
 
   // --- respect the hours each employee said they are available for
   respect_declared_hours: true,
+  // Lift the pro-rated declared-hours cap to the longest shift in the catalogue
+  // when the window is shorter than a week. Without it a one-day window gives a
+  // 45-hour-a-week barista 6.4 hours and the day cannot be staffed at all.
+  prorate_floor: true,
   // Plan only this share of those hours, keeping the rest free to absorb a
   // disruption later in the week. 0 plans people right up to what they asked for.
   plan_reserve: 0,
@@ -86,17 +102,20 @@ const dayNo = iso => Math.round(new Date(iso + 'T00:00:00Z') / 864e5);
 const num = x => (Math.round(x * 1e6) / 1e6);
 const fmt = x => { const v = num(x); return (v >= 0 ? '+ ' : '- ') + Math.abs(v); };
 
-/** Minutes of template t that fall inside clock hour h, net of its break. */
+/** Minutes of template t that fall inside clock hour h. */
 function coverMinutes(tpl, h, P) {
   const lo = Math.max(tpl.start, h * 60), hi = Math.min(tpl.end, (h + 1) * 60);
   let m = Math.max(0, hi - lo);
-  if (!m || !P.apply_breaks) return m;
+  if (!m || P.break_treatment !== 'smear') return m;
   if (tpl.hours <= P.break_threshold_hours) return m;
-  // spread the unpaid break evenly across the shift: a fair, stated approximation
   return m * (1 - P.break_minutes / (tpl.hours * 60));
 }
-/** A template counts towards an hour when it covers at least half of it. */
-const covers = (tpl, h, P) => coverMinutes(tpl, h, P) >= 30 ? 1 : 0;
+/** How much of one barista-hour this template contributes to that hour. */
+function covers(tpl, h, P) {
+  const m = coverMinutes(tpl, h, P);
+  if (P.cover_mode === 'indicator') return m >= 30 ? 1 : 0;
+  return m / 60;
+}
 
 /* ===================================================================
    STAGE 1 — shift structure for one day
@@ -115,7 +134,10 @@ function stage1LP(branch, iso, R, params, headcount) {
   });
   for (let h = H0; h < H1; h++) {
     const need = R[h - H0] || 0;
-    const terms = T.map((t, i) => covers(t, h, P) ? `+ n_${i}` : null).filter(Boolean);
+    const terms = T.map((t, i) => {
+      const c = covers(t, h, P);
+      return c > 0 ? `${fmt(c)} n_${i}` : null;
+    }).filter(Boolean);
     if (!terms.length && !need) continue;
     cons.push(` cov_${h}: ${terms.join(' ') || '0 n_0'} + sh_${h} - sp_${h} = ${need}`);
     obj.push(`+ ${P.short_penalty} sh_${h}`, `+ ${P.spare_penalty} sp_${h}`);
@@ -218,10 +240,21 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
     });
     if (!mine.length) return;
     // weekly hours: the legal cap, and the hours the employee said they have
+    // The legal cap is law; the hours someone asked for are a preference.
+    // Pro-rating that preference by window length is right in the middle of a
+    // week and wrong at its edges: a one-day window would cap a 45-hour-a-week
+    // barista at 6.4 hours, shorter than any shift, so nobody can be assigned
+    // anything at all. The floor lifts it to the longest shift in the catalogue.
     const declared = (avail[e.id] || e.avail).hours;
-    const cap = P.respect_declared_hours && declared > 0
-      ? Math.min(P.max_weekly_hours, declared * (1 - (P.plan_reserve || 0)) * (days.length / 7))
-      : P.max_weekly_hours;
+    let cap = P.max_weekly_hours;
+    if (P.respect_declared_hours && declared > 0) {
+      let pro = declared * (1 - (P.plan_reserve || 0)) * (days.length / 7);
+      if (P.prorate_floor !== false) {
+        const longest = Math.max.apply(null, T.map(t => t.hours));
+        pro = Math.max(pro, Math.min(longest, P.max_weekly_hours));
+      }
+      cap = Math.min(P.max_weekly_hours, pro);
+    }
     cons.push(` wk_${ei}: ${mine.map(([v, t]) => `${fmt(t.hours)} ${v}`).join(' ')} <= ${num(cap)}`);
     const yd = days.map((_, di) => binSet.has(`y_${ei}_${di}`) || bin.indexOf(`y_${ei}_${di}`) >= 0 ? `+ y_${ei}_${di}` : null).filter(Boolean);
     if (yd.length) cons.push(` dy_${ei}: ${yd.join(' ')} <= ${P.max_days_per_week}`);
@@ -240,7 +273,9 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
       });
     }));
     // overtime above the threshold
-    gen.push(`o_${ei}`); bnd.push(` 0 <= o_${ei} <= ${P.max_weekly_hours}`);
+    // o_e stays continuous: as an integer it charged a 47.5-hour week for eight
+    // premium hours instead of seven and a half.
+    bnd.push(` 0 <= o_${ei} <= ${P.max_weekly_hours}`);
     cons.push(` ot_${ei}: ${mine.map(([v, t]) => `${fmt(t.hours)} ${v}`).join(' ')} - o_${ei} <= ${P.overtime_threshold}`);
     obj.push(`+ ${num(e.cost * (P.overtime_rate - 1))} o_${ei}`);
     // straight-time cost
@@ -253,7 +288,11 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
     days.forEach((iso, di) => T.forEach((t, ti) => { const v = V(ei, di, ti); if (v && used[di + '_' + ti]) terms.push(`${fmt(t.hours)} ${v}`); }));
     return terms;
   };
-  if (P.fairness_mode === 'absolute') {
+  // Fairness is a statement about a week's work. Pro-rated to a one-day window
+  // it says something absurd instead -- one shift lands someone at three times
+  // their share -- and then forbids the roster rather than balancing it.
+  const fairWindow = days.length >= 7;
+  if (P.fairness_mode === 'absolute' && fairWindow) {
     // max - min <= delta, as 2|E| constraints rather than |E|^2 pairwise ones
     const BIG = 300;
     let any = false;
@@ -267,7 +306,10 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
           bin.push(`w_${ei}`);
           yv.forEach(y => cons.push(` fa_${y}: ${y} - w_${ei} <= 0`));            // works => w = 1
           cons.push(` fb_${ei}: ${yv.map(y => `+ ${y}`).join(' ')} - w_${ei} >= 0`); // w = 1 => works
-          cons.push(` f2_${ei}: ${h.join(' ')} - Hmin + ${BIG} w_${ei} >= ${BIG}`);
+          // w = 0 must make this row slack, not impossible. With the inequality
+          // the other way round the exemption could never fire, and the relative
+          // form below returned an empty roster labelled optimal.
+          cons.push(` f2_${ei}: ${h.join(' ')} - Hmin - ${BIG} w_${ei} >= ${-BIG}`);
         } else cons.push(` f2_${ei}: ${h.join(' ')} - Hmin >= 0`);
       } else {
         cons.push(` f2_${ei}: ${h.join(' ')} - Hmin >= 0`);
@@ -278,7 +320,7 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
       cons.push(` f3: Hmax - Hmin <= ${P.fairness_delta}`);
       bnd.push(' 0 <= Hmax <= 200', ' 0 <= Hmin <= 200');
     }
-  } else if (P.fairness_mode === 'relative') {
+  } else if (P.fairness_mode === 'relative' && fairWindow) {
     // Everyone gets a similar SHARE of the hours they asked for:
     //   | H_e/req_e  -  H_f/req_f |  <=  pct
     // Written with Rmax/Rmin so it stays 2|E| constraints, and relaxed for
@@ -295,7 +337,7 @@ function stage2LP(branch, days, posByDay, avail, params, locked, carryEnd) {
         bin.push(`w_${ei}`);
         yv.forEach(y => cons.push(` ga_${y}: ${y} - w_${ei} <= 0`));
         cons.push(` gb_${ei}: ${yv.map(y => `+ ${y}`).join(' ')} - w_${ei} >= 0`);
-        cons.push(` g2_${ei}: ${h.join(' ')} ${fmt(-req)} Rmin + ${num(BIG * req)} w_${ei} >= ${num(BIG * req)}`);
+        cons.push(` g2_${ei}: ${h.join(' ')} ${fmt(-req)} Rmin - ${num(BIG * req)} w_${ei} >= ${num(-BIG * req)}`);
       } else {
         cons.push(` g2_${ei}: ${h.join(' ')} ${fmt(-req)} Rmin >= 0`);
       }
@@ -530,10 +572,8 @@ function coverage(rows, branch, demand, params) {
     let s = 0, p = 0;
     for (let h = 4; h < 24; h++) {
       const want = R[h - 4] || 0;
-      const have = list.filter(r => {
-        const t = { start: r.start, end: r.end, hours: r.hours };
-        return covers(t, h, P);
-      }).length;
+      let have = 0;
+      list.forEach(r => { have += covers({ start: r.start, end: r.end, hours: r.hours }, h, P); });
       need += want; got += Math.min(have, want);
       if (have < want) s += want - have; else p += have - want;
     }

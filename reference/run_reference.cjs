@@ -11,6 +11,13 @@ const fs = require('fs');
 const S = require('./solver.js');
 const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'seed.json'), 'utf8'));
 const branchId = Number(process.argv[2] || 43);
+// Which configuration to run. `legacy` reproduces the behaviour this solver had
+// before the port uncovered its defects; `corrected` is what it does now. The
+// Python model must agree with it in both.
+const MODE = (process.argv[3] || 'legacy');
+const PARAMS = MODE === 'legacy'
+  ? { cover_mode: 'indicator', break_treatment: 'smear', prorate_floor: false }
+  : {};
 const br = seed.branches.find(b => b.id === branchId);
 if (!br) { console.error('no such branch: ' + branchId); process.exit(2); }
 
@@ -38,7 +45,7 @@ const weeks = [];
   const opened = {};
 
   for (const days of weeks) {
-    const r = S.planWeek(highs, br, days, br.demand, {}, { avail: {}, carryEnd: carry });
+    const r = S.planWeek(highs, br, days, br.demand, PARAMS, { avail: {}, carryEnd: carry });
     all = all.concat(r.assign);
     unfilled += r.unfilled.length;
     positions += r.positions;
@@ -52,8 +59,8 @@ const weeks = [];
   }
 
   const rows = all.map(a => ({ date: a.date, emp: a.emp, start: a.start, end: a.end, hours: a.hours }));
-  const cov = S.coverage(rows, br, br.demand, {});
-  const au = S.audit(rows, {});
+  const cov = S.coverage(rows, br, br.demand, PARAMS);
+  const au = S.audit(rows, PARAMS);
 
   const hours = {};
   rows.forEach(r => { hours[r.emp] = (hours[r.emp] || 0) + r.hours; });
@@ -76,6 +83,7 @@ const weeks = [];
   const round = (x, n) => Math.round(x * 10 ** n) / 10 ** n;
   console.log(JSON.stringify({
     branch: branchId,
+    mode: MODE,
     shifts: rows.length,
     positions,
     unfilled,
